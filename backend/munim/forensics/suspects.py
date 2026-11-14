@@ -83,9 +83,9 @@ CATALOGUE: dict[str, SuspectSpec] = {s.id: s for s in [
                     "the fare is not refunded.",
         intents=[Intent.TRAVEL_REFUND], remedies=[A.NO_ACTION]),
     SuspectSpec(
-        id="AIRLINE_NOT_PAID", title="Airline has not paid back yet", kind="HOLD",
-        description="The airline cancelled the flight but has not yet sent the fare back to us; the travel team has to chase "
-                    "the airline.",
+        id="AIRLINE_NOT_PAID", title="Airline refund still on its way", kind="HOLD",
+        description="The airline cancelled the flight and either has not yet sent the fare back to us (the travel team "
+                    "chases the airline) or sent it within the last 7 days (it is still inside the pass-on window).",
         intents=[Intent.TRAVEL_REFUND], remedies=[A.ESCALATE]),
 ]}
 
@@ -662,6 +662,19 @@ def _airline_not_paid(conn, mid: str, ctx: dict) -> SuspectResult:
     cs = [c for c in T.flight_checks(conn, mid, ctx["today_d"]) if c.cancelled]
     if not cs:
         return _result(sid, "NOT_APPLICABLE", f"{mid} has no cancelled flight, so no airline refund is awaited.")
+    recent = [c for c in cs if c.in_window]
+    if recent:
+        c = recent[0]
+        b, paid = c.booking, c.paid
+        due = F.as_date(paid["received_at"]) + timedelta(days=T.PASS_ON_DAYS)
+        summary = (f"{b['operator_name']} cancelled {b['service_no']} ({T.route(b)}, {F.fdate(b['departs_at'])}) and paid "
+                   f"{rupees(paid['amount_paise'])} back to us on {F.fdate(paid['received_at'])}, "
+                   f"{F.plural(c.days or 0, 'day')} ago; it is inside the {T.PASS_ON_DAYS}-day pass-on window and is due to "
+                   f"reach the passenger by {F.fdate(due)}.")
+        return _result(sid, "MATCH", summary, _flight_evidence(conn, mid, c),
+                       targets={"booking_id": b["id"], "pnr": b["pnr"], "operator": b["operator_name"],
+                                "airline_refund_id": paid["id"], "due_by": due.isoformat()},
+                       remedies=[A.NO_ACTION])
     hits = [c for c in cs if c.not_paid]
     if hits:
         c = hits[0]

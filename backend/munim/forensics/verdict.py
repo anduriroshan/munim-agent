@@ -153,7 +153,7 @@ def _hold_headline(h: SuspectResult) -> str:
         why = f" until the {F.join_and(docs)} is updated" if docs else " until the KYC documents are updated"
         return f"Payout held for KYC: hold {hid} is keeping back {what}{why}."
     if h.suspect_id == "AIRLINE_NOT_PAID":
-        return f"Waiting on the airline: {h.summary}"
+        return f"Refund on its way: {h.summary}" if h.targets.get("due_by") else f"Waiting on the airline: {h.summary}"
     return f"Payout held: {F.lc_first(h.summary)}"
 
 

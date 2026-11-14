@@ -61,7 +61,7 @@ export const CAUSE_TITLES: Record<string, string> = {
   BUS_TRIP_FAILED: "Bus turned back, fare kept",
   AIRLINE_REFUND_NOT_PASSED: "Airline paid, refund not passed on",
   TRAVEL_NO_SHOW: "Passenger did not board",
-  AIRLINE_NOT_PAID: "Airline has not paid back yet",
+  AIRLINE_NOT_PAID: "Airline refund still on its way",
 };
 export const causeTitle = (id: string | null | undefined) => (id ? (CAUSE_TITLES[id] ?? cap(id.replace(/_/g, " ").toLowerCase())) : "");
 

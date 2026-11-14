@@ -86,7 +86,7 @@ export const SUSPECT_TITLES: Record<string, string> = {
   BUS_TRIP_FAILED: "Bus trip failed, fare not refunded",
   AIRLINE_REFUND_NOT_PASSED: "Airline refund received, not passed on",
   TRAVEL_NO_SHOW: "Passenger did not board",
-  AIRLINE_NOT_PAID: "Airline has not paid back yet",
+  AIRLINE_NOT_PAID: "Airline refund still on its way",
 };
 
 export function suspectTitle(id: string | null | undefined): string {

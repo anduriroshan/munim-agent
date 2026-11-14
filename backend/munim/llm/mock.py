@@ -515,7 +515,11 @@ def propose(ctx: dict) -> Proposal:
                      + (" Book the overdue pickup." if any(a.action_type == A.SCHEDULE_PICKUP for a in acts) else ""))
     elif outcome == "HOLD_EXPLAINED":
         hold = targets.get("hold_id")
-        if "AIRLINE_NOT_PAID" in culprits:
+        if "AIRLINE_NOT_PAID" in culprits and targets.get("due_by"):
+            acts.append(ProposedAction(action_type=A.NO_ACTION,
+                                       reason=f"The airline refund arrived recently and is due to the passenger by {targets['due_by']}; nothing to change."))
+            rationale = "The airline has paid; the refund is inside the pass-on window, so tell the passenger when it lands."
+        elif "AIRLINE_NOT_PAID" in culprits:
             op, pnr = targets.get("operator") or "the airline", targets.get("pnr") or ""
             ref = f" (PNR {pnr})" if pnr else ""
             acts.append(ProposedAction(action_type=A.ESCALATE, team="travel", target_id=targets.get("booking_id") or None,
@@ -832,6 +836,7 @@ S: dict[str, dict[str, str]] = {
         "fare_done": "पूरा टिकट किराया {amount} आपके Paytm खाते में वापस भेज दिया गया है।",
         "flight_not_passed": "{airline} ने {cancel_on} आपकी फ़्लाइट रद्द की और {paid_on} {paid} Paytm को लौटा दिए। हमारी तरफ़ मिलान की गलती से यह पैसा आप तक नहीं पहुँचा।",
         "airline_wait": "{airline} ने {cancel_on} आपकी फ़्लाइट रद्द की, पर अभी तक टिकट का पैसा Paytm को नहीं लौटाया है। हमारी ट्रैवल टीम एयरलाइन से बात कर रही है।",
+        "airline_paid_recent": "{airline} ने {paid_on} {paid} Paytm को लौटा दिए हैं। यह पैसा {due} तक आपके खाते में पहुँच जाएगा।",
         "no_show": "{date_on} बस {service} में आपके टिकट का बोर्डिंग स्कैन नहीं है, इसलिए इसे यात्रा न किया गया टिकट माना गया और किराया वापस नहीं होता। अगर आपने यात्रा की थी तो टिकट की फ़ोटो भेजें।",
         "prepickup_1": "पिकअप से पहले की 1 कटौती सही थी।",
         "prepickup_n": "पिकअप से पहले की {k} कटौतियाँ सही थीं।",
@@ -916,6 +921,7 @@ S: dict[str, dict[str, str]] = {
         "fare_done": "Poora ticket kiraya {amount} aapke Paytm account mein wapas bhej diya gaya hai.",
         "flight_not_passed": "{airline} ne {cancel_on} aapki flight cancel ki aur {paid_on} {paid} Paytm ko lauta diye. Hamari taraf matching ki galti se yeh paisa aap tak nahi pahuncha.",
         "airline_wait": "{airline} ne {cancel_on} aapki flight cancel ki, par abhi tak ticket ka paisa Paytm ko nahi lautaya. Hamari travel team airline se baat kar rahi hai.",
+        "airline_paid_recent": "{airline} ne {paid_on} {paid} Paytm ko lauta diye hain. Yeh paisa {due} tak aapke account mein pahunch jayega.",
         "no_show": "{date_on} bus {service} mein aapke ticket ka boarding scan nahi hai, isliye ise bina yatra wala ticket mana gaya aur kiraya wapas nahi hota. Agar aapne yatra ki thi to ticket ki photo bhejein.",
         "prepickup_1": "Pickup se pehle wali 1 katauti sahi thi.",
         "prepickup_n": "Pickup se pehle wali {k} katautiyan sahi thi.",
@@ -1000,6 +1006,7 @@ S: dict[str, dict[str, str]] = {
         "fare_done": "పూర్తి టికెట్ ధర {amount} మీ Paytm ఖాతాకు తిరిగి పంపాము.",
         "flight_not_passed": "{airline} {cancel_on} మీ ఫ్లైట్‌ను రద్దు చేసింది, {paid_on} {paid} Paytm కు తిరిగి చెల్లించింది. మా వైపు జరిగిన మ్యాచింగ్ లోపం వల్ల ఆ డబ్బు మీకు చేరలేదు.",
         "airline_wait": "{airline} {cancel_on} మీ ఫ్లైట్‌ను రద్దు చేసింది, కానీ ఇంకా టికెట్ డబ్బులు Paytm కు తిరిగి చెల్లించలేదు. మా ట్రావెల్ టీమ్ ఎయిర్‌లైన్‌తో మాట్లాడుతోంది.",
+        "airline_paid_recent": "{airline} {paid_on} {paid} Paytm కు తిరిగి చెల్లించింది. ఆ డబ్బు {due} లోపు మీ ఖాతాకు చేరుతుంది.",
         "no_show": "{date_on} బస్సు {service} లో మీ టికెట్‌కు బోర్డింగ్ స్కాన్ లేదు, కాబట్టి ప్రయాణం చేయని టికెట్‌గా లెక్కించాం, ఛార్జీ తిరిగి రాదు. మీరు ప్రయాణం చేసి ఉంటే టికెట్ ఫోటో పంపండి.",
         "prepickup_1": "పికప్‌కు ముందు జరిగిన 1 కటింగ్ సరైనదే.",
         "prepickup_n": "పికప్‌కు ముందు జరిగిన {k} కటింగ్‌లు సరైనవే.",
@@ -1084,6 +1091,7 @@ S: dict[str, dict[str, str]] = {
         "fare_done": "The full fare of {amount} has been sent back to your Paytm account.",
         "flight_not_passed": "{airline} cancelled your flight {cancel_on} and paid {paid} back to Paytm {paid_on}. A matching error on our side kept it from reaching you.",
         "airline_wait": "{airline} cancelled your flight {cancel_on} but has not yet paid the fare back to Paytm. Our travel team is following up with the airline.",
+        "airline_paid_recent": "{airline} paid {paid} back to Paytm {paid_on}. It will reach your account by {due}.",
         "no_show": "There is no boarding scan for your ticket on bus {service} {date_on}, so it counts as a missed trip and the fare is not refunded. If you did travel, please send a photo of your ticket.",
         "prepickup_1": "The 1 debit before the pickup was valid.",
         "prepickup_n": "The {k} debits before the pickup were valid.",
@@ -1340,6 +1348,9 @@ def _travel_body(ctx: dict, lang: str, outcome: str, culprits: list[str]) -> lis
         else:
             out.append(T["case_review"])
         return out
+    due_by = _d(v.get("targets")).get("due_by")
+    if "AIRLINE_NOT_PAID" in culprits and due_by:
+        return [T["checked"], cap(T["airline_paid_recent"].format(**fill, due=fmt_date(str(due_by), lang)))]
     if "AIRLINE_NOT_PAID" in culprits:
         return [cap(T["airline_wait"].format(**fill))]
     if "TRAVEL_NO_SHOW" in culprits:
@@ -1520,8 +1531,7 @@ def _respond_body(ctx: dict, lang: str) -> list[str]:
 
     elif outcome == "NO_EVIDENCE":
         out.append(T["noev_checked"])
-        blocked = any(e.get("action_type") == "REFUND_DEBITS" and e.get("status") in ("BLOCKED", "REJECTED") for e in _execs(ctx))
-        if blocked or _d(ctx.get("intake")).get("injection_suspected"):
+        if _d(ctx.get("intake")).get("injection_suspected"):
             out += [T["noev_blocked"], T["noev_ask"]]
         else:
             out.append(T["noev_ask_plain"])
