@@ -35,7 +35,7 @@ Run tests with `backend/.venv/Scripts/python.exe -m pytest -q tests/...` from `b
 - All seed data is **fictional**. Use no real people or lenders, and masked phones like `98XXXX1234`.
 - Imports are absolute (`from munim.models import ...`). Modules must not do network or DB work at import time.
 
-## The 8 demo scenarios (A seeds the facts; B's mock scripts the LLM behaviour)
+## The 9 demo scenarios (A seeds the facts; B's mock scripts the LLM behaviour)
 
 Each scenario merchant has a full history, so the trail is non-trivial. The complaint texts below are **verbatim**, so use them exactly.
 
@@ -151,6 +151,21 @@ Each scenario merchant has a full history, so the trail is non-trivial. The comp
   - The outcome is **IMPROVISED** with LOW confidence. The mock proposes ESCALATE team=payments ("help merchant contest the chargeback"), which is ALLOWED.
 - **Statements:** SETTLEMENT_SHORT ₹2,340 on 2026-11-13 → VERIFIED (gross ₹18,220 − net ₹15,880).
 
+### S9 `stuck_return`: the return is stuck on our side; refund the rent after the pickup window and book the pickup
+- **Merchant:** M1009 *Pooja Fancy Store*, owner Pooja Agarwal, Kanpur, `hi`, kirana.
+- **Complaint:** `मैंने 22 अगस्त को साउंडबॉक्स वापस करने की रिक्वेस्ट डाली थी, पर कोई लेने नहीं आया। तीन बार फ़ोन भी किया। मशीन तब से बंद पड़ी है, फिर भी सितंबर से हर महीने ₹299 कट रहा है। पैसा वापस करो और मशीन ले जाओ।`
+- **Facts:**
+  - Plan `PLAN_SB299`, ₹299/month. Device D50009 (SBLT-8H3R27) installed 2025-12-03, status RETURN_REQUESTED. SUB-1009-A is ACTIVE.
+  - Device events: RETURN_REQUESTED 2026-08-22 17:05, PICKUP_SCHEDULED 2026-08-23 (slot 25 Aug). Ticket PK-260822-1009 is SCHEDULED for 2026-08-25 with 0 attempts. No PICKED_UP, no failed attempt.
+  - Payments through D50009 stop on 2026-08-21. From 22 Aug the shop takes payments on a static QR (no device).
+  - Rent debits of ₹299 on 1 Sep, 1 Oct and 1 Nov 2026, all after the pickup window.
+- **Pickup window:** `MUNIM_RETURN_PICKUP_DAYS` (default 7). Rent with a value date after request + window is ours to refund.
+- **Expected outcome:**
+  - RETURN_STUCK **MATCH**. Damages = **₹897** (3 × ₹299). ZOMBIE_BILLING and PICKUP_NOT_COMPLETED are ELIMINATED.
+  - The mock proposes REFUND_DEBITS ₹897, CANCEL_SUBSCRIPTION SUB-1009-A and SCHEDULE_PICKUP D50009. All are **ALLOWED** (the old ticket's slot is in the past).
+  - Sweep: RETURN_STUCK finds 7 other merchants (₹4,790).
+- **Statements:** DEVICE_RETURNED 2026-08-22 → PARTLY_TRUE (return requested and no payments since, but not collected yet).
+
 ### Background population (A): makes sweeps and the trail meaningful
 About 180 fictional merchants, M2001–M2180, across many cities, languages and categories. Each has a device, a subscription (₹499 `PLAN_SB499` or
 ₹299 `PLAN_SB299` "Soundbox Lite"), monthly rent debits, settlements for the last 14 days, and light payments for the last 30 days. About 25% have a loan with
@@ -158,6 +173,7 @@ daily EDI for the last 30 days. Seeded failure patterns:
 - **About 36 ZOMBIE_BILLING victims:** pickup completed 1–3 months ago, subscription still ACTIVE, 1–3 debits after pickup.
 - About 20 healthy returns: pickup completed and the subscription correctly cancelled.
 - About 6 DUPLICATE_SUBSCRIPTION, about 5 DUPLICATE_EDI, about 8 PICKUP_NOT_COMPLETED, 3 RISK holds, 5 KYC holds.
+- **10 stuck returns, M2181–M2190** (seeded after the rest, so earlier ids and values do not move): 7 are RETURN_STUCK victims (pickup slot passed, no payments since the request, rent after the window); 1 had the courier turned away (SHOP_CLOSED, merchant side); 2 asked to return a few days ago (window still open).
 
 Use `random.Random(42)` so data is deterministic. Seeding must take under 5 s.
 
@@ -166,6 +182,7 @@ Use `random.Random(42)` so data is deterministic. Seeding must take under 5 s.
 | suspect_id | kind | intents | MATCH when (deterministic) | damages | remedies | sweepable |
 |---|---|---|---|---|---|---|
 | ZOMBIE_BILLING | FAULT | RENT | Subscription's device has PICKED_UP (or a COMPLETED pickup ticket), and SUCCESS RENT_DEBITs for that subscription have value_date > pickup date and are not refunded | those debits | REFUND_DEBITS, CANCEL_SUBSCRIPTION | yes |
+| RETURN_STUCK | FAULT | RENT | Return requested, no PICKED_UP, no payments through the device since the request, no failed attempt on the merchant's side (SHOP_CLOSED, MERCHANT_UNAVAILABLE, MERCHANT_REFUSED), and request + `RETURN_PICKUP_DAYS` is past | unrefunded SUCCESS RENT_DEBITs with value_date after the window | REFUND_DEBITS, CANCEL_SUBSCRIPTION, SCHEDULE_PICKUP (one device) | yes |
 | DUPLICATE_SUBSCRIPTION | FAULT | RENT | ≥2 ACTIVE subscriptions on the same device | the later subscription's unrefunded SUCCESS debits | REFUND_DEBITS, CANCEL_SUBSCRIPTION (target = later sub) | yes |
 | DUPLICATE_EDI | FAULT | LOAN | More than 1 SUCCESS EDI_DEBIT for the same loan and due_date | the extra ones (all but the first), unrefunded | REFUND_DEBITS | yes |
 | PICKUP_NOT_COMPLETED | INNOCENT | RENT | Return requested, no PICKED_UP, and the device processed payments after the request | none | SCHEDULE_PICKUP | no |
@@ -203,13 +220,30 @@ def decide_verdict(suspects: list[SuspectResult], intake: IntakeResult, plan: Pr
 #   elif plan.finding and plan.evidence_ledger_ids → IMPROVISED (LOW, remedies [ESCALATE, NO_ACTION], no damages)
 #   elif nothing disputed / plan found nothing → NO_EVIDENCE (remedies [NO_ACTION, ESCALATE]);  else UNSOLVED ([ESCALATE])
 # munim/forensics/probe.py   (guarded read-only SQL for the improvise step)
-def run_probe(sql: str, merchant_id: str, step: int, purpose: str, db_path=None) -> Probe
+def run_probe(sql: str, merchant_id: str, step: int, purpose: str, db_path=None, tables: set[str] | None = None) -> Probe
 #   Single SELECT/WITH only; read-only URI connection (mode=ro) + PRAGMA query_only; sqlite3 authorizer allowing only
 #   SELECT/READ/FUNCTION on business tables (never cases/actions/audit_log/notifications/sweeps); must reference the merchant id
 #   literal and no other merchant id; progress-handler time cap; at most config.PROBE_ROW_LIMIT rows. Never raises: errors go in Probe.error.
+#   `tables` = the tables of turned-on database sources (current().enabled_tables()); others are refused as "not connected".
 # munim/forensics/schema_card.py
-def schema_card() -> str   # compact LLM-facing description of business tables, columns, joins, enums, paise, scoping rule, 2 example queries
+def schema_card(hits: list[SourceHit] | None = None) -> str
+#   compact LLM-facing description of the connected tables, joins, enums, paise, scoping rule, 2 example queries.
+#   Built from the turned-on database sources. With `hits`, adds "MOST RELEVANT TO THIS COMPLAINT: <reached tables>".
 ```
+
+### Connected sources: `munim.sources` (folder `backend/sources/*.yaml`, see its README)
+```python
+def current() -> Registry          # the folder, re-read when a file changes (name, mtime, size). Never raises.
+def route(reg, intake, complaint_text) -> list[Routed]   # which sources this complaint reaches, and why
+async def reach(reg, intake, complaint_text, merchant_id, timeout_s=None) -> SourcesReport
+#   database: listed with its tables; file/api: reads this merchant's rows (max_rows). A failing source → status "error". Never raises.
+def count_records(report, trail_tables) -> SourcesReport  # database records on the money trail; a trail-linked source counts as reached
+def listing(reg) -> dict           # for GET /api/sources: no header values, no URL query strings
+# Registry: enabled_tables(), table_about(), owner(action), action_allowed(action)
+```
+- Called by the `trail` node, which emits `sources`. `improvise` uses the reached tables in the schema card and passes file/API rows as untrusted data.
+- `propose` offers only actions whose source is on. The firewall's allowlist refuses an action whose source is off. If the folder can't be read, it refuses everything except ESCALATE / NO_ACTION.
+- The 7 suspects, the trail and the statement checks are code. They read the tables directly and don't depend on this folder.
 
 ### B: `munim.llm.*`, `munim.voice.*`
 ```python
@@ -245,7 +279,7 @@ def describe() -> dict                        # {"reasoner": {"provider","model"
 
   ctx values are plain dicts (model_dump(mode="json")).
 - **Mock propose logic:** trust the witness.
-  - REFUND_DUE: amount = DEDUCTION_COUNT.count × DEDUCTION_AMOUNT.amount when both claims exist, else verdict.damages_paise. ledger ids = verdict damages. Add CANCEL_SUBSCRIPTION when it is in remedies and targets has subscription_id (for DUPLICATE_SUBSCRIPTION, the duplicate's id is in targets).
+  - REFUND_DUE: amount = DEDUCTION_COUNT.count × DEDUCTION_AMOUNT.amount when both claims exist, else verdict.damages_paise. ledger ids = verdict damages. Add CANCEL_SUBSCRIPTION when it is in remedies and targets has subscription_id (for DUPLICATE_SUBSCRIPTION, the duplicate's id is in targets). Add SCHEDULE_PICKUP when it is in remedies and targets names one device_id (RETURN_STUCK).
   - HOLD with RISK_HOLD: RELEASE_HOLD hold_id plus ESCALATE risk. HOLD with KYC_HOLD: SEND_KYC_LINK hold_id.
   - NO_FAULT with PICKUP_NOT_COMPLETED: SCHEDULE_PICKUP device_id.
   - NO_FAULT with ALREADY_REFUNDED, and claims carry count/amount: REFUND_DEBITS of the claimed amount on the refunded ids (gullible; the firewall must block it).
@@ -333,6 +367,7 @@ Base `/api`. JSON throughout. In dev, Vite proxies `/api` to `http://127.0.0.1:8
 |---|---|---|
 | GET `/api/health` | | `{ok, today, providers: describe(), counts: {merchants, cases}}` |
 | GET `/api/scenarios` | | `[{...Scenario, merchant: {id,business_name,owner_name,city,language,category}}]` |
+| GET `/api/sources` | | `{dir, sources: [{id, name, kind, enabled, file, holds, when, tables, actions, blocked_actions, max_rows, detail, warnings}], problems}` (re-read per call; no secrets) |
 | GET `/api/merchants?q=` | | `[{id,business_name,owner_name,city,language,category}]` (scenario merchants first, max 50) |
 | POST `/api/cases` | `{merchant_id, complaint_text, channel?: "chat"\|"voice", scenario_id?}` | `{case_id}` (the run starts immediately) |
 | GET `/api/cases` | | `[{id, merchant_id, business_name, status, outcome, language, complaint_text, created_at}]` newest first |
@@ -349,6 +384,7 @@ Base `/api`. JSON throughout. In dev, Vite proxies `/api` to `http://127.0.0.1:8
 | POST `/api/voice/tts` | `{text, language}` | `{audio_base64, mime, provider}` |
 
 Event envelope and payloads: see `backend/munim/events.py`. Event types, in typical order:
-`case` → `node`(intake start) → `llm`… → `llm_done` → `intake` → `node`(hunch) → `hunch` → `trail` → `statements` → `suspect` ×7
+`case` → `node`(intake start) → `llm`… → `llm_done` → `intake` → `node`(hunch) → `hunch` → `trail` → `sources` → `statements` → `suspect` ×7
 → [`probe` ×N] → `verdict` → `llm`… → `proposal` → `firewall` → `execution` → `llm`… (writer) → `message` → [`sweep`] → `done`.
 Each node emits `node` start and end (`ms`, one-line `summary`). Skipped nodes emit `status: "skip"`.
+`sources` carries a `SourcesReport` (`models.py`): every turned-on source, the reached ones first, with `why`, `records`, and the file/API rows.

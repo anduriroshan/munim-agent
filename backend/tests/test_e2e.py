@@ -64,7 +64,11 @@ EXPECT = {
     "kyc_hold": ("HOLD_EXPLAINED", "ALLOW", "RESOLVED"),
     "prompt_injection": ("NO_EVIDENCE", "BLOCK", "BLOCKED"),
     "cold_case": ("IMPROVISED", "ALLOW", "ESCALATED"),
+    "stuck_return": ("REFUND_DUE", "ALLOW", "RESOLVED"),
+    "bus_turned_back": ("REFUND_DUE", "ALLOW", "RESOLVED"),
+    "flight_refund": ("REFUND_DUE", "NEEDS_HUMAN", "AWAITING_APPROVAL"),
 }
+PASSENGER_SCENARIOS = {"bus_turned_back", "flight_refund"}
 
 
 def test_scenario_ids_match_contract():
@@ -89,8 +93,8 @@ def test_scenario_end_to_end(demo_db, scenario_id):
     for needed in ("intake", "hunch", "trail", "statements", "suspect", "verdict", "proposal", "firewall", "execution", "message", "llm", "llm_done"):
         assert needed in t, needed
     assert t.index("intake") < t.index("trail") < t.index("statements") < t.index("suspect") < t.index("verdict") < t.index("proposal") < t.index("firewall") < t.index("execution")
-    # full lineup emitted
-    assert t.count("suspect") == 7
+    # full lineup emitted (shops: 8 suspects; passengers: the 4 travel ones plus ALREADY_REFUNDED)
+    assert t.count("suspect") == (5 if scenario_id in PASSENGER_SCENARIOS else 8)
     # under FORCE_MOCK the streamed tokens name the scripted brain, matching llm_done (not the configured provider)
     named = {e.data["provider"] for e in events if e.type == "llm" and e.data.get("provider")}
     assert named <= {"mock"}, named
@@ -186,6 +190,25 @@ def test_s8_improvises_with_probes(demo_db):
     assert node_statuses(events)["improvise"] == "end"
 
 
+def test_s9_stuck_return_refund_cancel_pickup_and_sweep(demo_db):
+    _, state, events = run_scenario("stuck_return")
+    assert state["verdict"]["culprits"] == ["RETURN_STUCK"]
+    av = {a["proposed"]["action_type"]: a for a in state["firewall"]["actions"]}
+    assert av["REFUND_DEBITS"]["final"]["amount_paise"] == 89700
+    assert {"CANCEL_SUBSCRIPTION", "SCHEDULE_PICKUP"} <= set(av)
+    assert all(a["decision"] in ("ALLOW", "CORRECTED") for a in av.values())
+    with connect(demo_db) as conn:
+        credits = rows(conn, "SELECT amount_paise FROM ledger_entries WHERE merchant_id='M1009' AND entry_type='REFUND_CREDIT'")
+        sub = one(conn, "SELECT status FROM subscriptions WHERE merchant_id='M1009' AND device_id='D50009'")
+        ticket = one(conn, "SELECT status FROM pickup_tickets WHERE device_id='D50009' AND id LIKE 'PK-%-M%'")
+    assert sum(c["amount_paise"] for c in credits) == 89700 and len(credits) == 3
+    assert sub["status"] == "CANCELLED" and ticket["status"] == "SCHEDULED"
+    reply = [e for e in events if e.type == "message" and e.data["role"] == "munim"][-1].data["text"]
+    assert "22 अगस्त" in reply and "₹897" in reply and "पिकअप" in reply
+    sweep = [e for e in events if e.type == "sweep"]
+    assert sweep and sweep[0].data["merchant_count"] >= 5
+
+
 def test_api_flow(demo_db):
     from fastapi.testclient import TestClient
     from munim.api.main import app
@@ -194,7 +217,7 @@ def test_api_flow(demo_db):
         assert h["ok"] and h["counts"]["merchants"] > 100
         assert set(h["providers"]) >= {"reasoner", "writer", "decider"}
         sc = c.get("/api/scenarios").json()
-        assert len(sc) == 8 and sc[0]["merchant"]["business_name"]
+        assert len(sc) == 11 and sc[0]["merchant"]["business_name"]
         assert c.get("/api/merchants", params={"q": "Sharma"}).json()[0]["id"] == "M1001"
         s1 = next(s for s in sc if s["id"] == "zombie_rent")
         cid = c.post("/api/cases", json={"merchant_id": s1["merchant_id"], "complaint_text": s1["complaint_text"], "scenario_id": s1["id"]}).json()["case_id"]

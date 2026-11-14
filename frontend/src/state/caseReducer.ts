@@ -18,6 +18,7 @@ import {
   type Probe,
   type Proposal,
   type ReplyDraft,
+  type SourcesReport,
   type StatementCheck,
   type SuspectResult,
   type SweepResult,
@@ -73,6 +74,12 @@ export interface ChatMessage {
   /** Chat answers: a reply to send the merchant, in their language. */
   reply?: ReplyDraft | null;
   newCase?: boolean;
+  /** Seq of the `message` event that confirmed this text (drafts are sent by seq). */
+  seq?: number | null;
+  /** Team cases: the reply waits for a teammate's Send. */
+  draft?: boolean;
+  /** Set once a teammate sent it. */
+  sent?: { by: string; edited: boolean; at: string | null } | null;
 }
 
 export interface ExecutionView extends ExecutionResult {
@@ -96,6 +103,8 @@ export interface CaseView {
   intake: IntakeResult | null;
   hunch: Hunch | null;
   trail: Trail | null;
+  /** Connected sources: where Munim looked for this case (older recordings have none). */
+  sources: SourcesReport | null;
   statements: StatementCheck[] | null;
   suspects: SuspectResult[];
   probes: Probe[];
@@ -135,6 +144,7 @@ export function initialCaseView(): CaseView {
     intake: null,
     hunch: null,
     trail: null,
+    sources: null,
     statements: null,
     suspects: [],
     probes: [],
@@ -347,9 +357,21 @@ function onMessage(state: CaseView, ev: MunimEvent): CaseView {
     body = en;
     language = "en";
   }
+  if (role === "munim" && kind === "sent") {
+    // A teammate sent a draft: mark that message sent (with their edit, if any). No new bubble.
+    const ref = typeof d.ref === "number" ? d.ref : null;
+    const i = state.messages.findIndex((m) => m.role === "munim" && m.seq != null && m.seq === ref);
+    if (i < 0) return state;
+    const msgs = state.messages.slice();
+    const edited = d.edited === true;
+    msgs[i] = { ...msgs[i], text: text || msgs[i].text, en: edited ? en : (en ?? msgs[i].en), draft: false,
+      sent: { by: str(d.by, "ops.lead"), edited, at: ev.at ?? null } };
+    return { ...state, messages: msgs };
+  }
   const extra = {
     en,
     kind,
+    draft: d.draft === true,
     sources: Array.isArray(d.sources) ? d.sources.filter((x): x is string => typeof x === "string" && !!x.trim()) : [],
     newCase: d.new_case === true,
     reply,
@@ -374,14 +396,14 @@ function onMessage(state: CaseView, ev: MunimEvent): CaseView {
   const idx = findOpenMunimMessage(state.messages);
   if (idx >= 0) {
     const msgs = state.messages.slice();
-    msgs[idx] = { ...msgs[idx], text: body || msgs[idx].text, language: language ?? msgs[idx].language, streaming: !final, final, ...extra };
+    msgs[idx] = { ...msgs[idx], text: body || msgs[idx].text, language: language ?? msgs[idx].language, streaming: !final, final, seq: ev.seq, ...extra };
     return { ...state, messages: msgs };
   }
   return {
     ...state,
     messages: [
       ...state.messages,
-      { id: `m-${ev.seq}`, role, text: body, language, streaming: !final, final, node: null, at: ev.at ?? null, ...extra },
+      { id: `m-${ev.seq}`, role, text: body, language, streaming: !final, final, node: null, at: ev.at ?? null, seq: ev.seq, ...extra },
     ],
   };
 }
@@ -483,6 +505,8 @@ export function applyEvent(state: CaseView, ev: MunimEvent | null | undefined): 
       return { ...s, hunch: { ...(data as unknown as Hunch), probabilities: isObj(data.probabilities) ? (data.probabilities as Record<string, number>) : {} } };
     case "trail":
       return { ...s, trail: data as unknown as Trail };
+    case "sources":
+      return { ...s, sources: { sources: Array.isArray(data.sources) ? (data.sources as SourcesReport["sources"]).filter(isObj) : [], problems: Array.isArray(data.problems) ? (data.problems as string[]) : [] } };
     case "statements":
       return { ...s, statements: Array.isArray(data.checks) ? (data.checks as StatementCheck[]) : [] };
     case "suspect": {

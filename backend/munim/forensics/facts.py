@@ -13,9 +13,11 @@ from typing import Any, Iterable
 
 from munim.models import Claim, ClaimKind, EvidenceRef, IntakeResult, Intent, rupees
 
-RENT, LOAN, SETTLEMENT = "RENT", "LOAN", "SETTLEMENT"
-AREAS = (RENT, LOAN, SETTLEMENT)
-INTENT_AREA = {Intent.RENT_DEDUCTION: RENT, Intent.LOAN_DEDUCTION: LOAN, Intent.SETTLEMENT_ISSUE: SETTLEMENT}
+RENT, LOAN, SETTLEMENT, TRAVEL = "RENT", "LOAN", "SETTLEMENT", "TRAVEL"
+AREAS = (RENT, LOAN, SETTLEMENT)                   # a shop's money areas
+ALL_AREAS = (RENT, LOAN, SETTLEMENT, TRAVEL)       # + ticket refunds (passenger accounts)
+INTENT_AREA = {Intent.RENT_DEDUCTION: RENT, Intent.LOAN_DEDUCTION: LOAN, Intent.SETTLEMENT_ISSUE: SETTLEMENT,
+               Intent.TRAVEL_REFUND: TRAVEL}
 
 MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 MONTH_FULL = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
@@ -206,8 +208,17 @@ class Scope:
     strict: set[str] = field(default_factory=set)   # areas reached only via OTHER/hints: dispute only explicit matches
 
 
+def is_passenger(conn, account_id: str) -> bool:
+    """A travel customer: an account with category 'passenger' (no shop, no Soundbox, no loan)."""
+    r = conn.execute("SELECT category FROM merchants WHERE id=?", (account_id,)).fetchone()
+    return bool(r) and r[0] == "passenger"
+
+
 def scope(conn, merchant_id: str, intake: IntakeResult | None) -> Scope:
-    """Which money areas the complaint touches. OTHER → all areas; claims can widen a misclassified intent."""
+    """Which money areas the complaint touches. OTHER → all areas; claims can widen a misclassified intent.
+    A passenger account only has ticket refunds to look at."""
+    if is_passenger(conn, merchant_id) or (intake is not None and intake.intent == Intent.TRAVEL_REFUND):
+        return Scope({TRAVEL})
     if intake is None:
         return Scope(set(AREAS))
     base = {INTENT_AREA[intake.intent]} if intake.intent in INTENT_AREA else set()
@@ -394,6 +405,48 @@ def zombie_analysis(conn, merchant_id: str) -> list[ZombieSub]:
     return out
 
 
+MERCHANT_SIDE_FAILURES = {"SHOP_CLOSED", "MERCHANT_UNAVAILABLE", "MERCHANT_REFUSED"}
+
+
+@dataclass
+class StuckReturn:
+    sub: dict
+    lc: Lifecycle
+    due_by: str                             # YYYY-MM-DD: request date + RETURN_PICKUP_DAYS
+    pay: PaymentStats                       # payments through the device since the request
+    merchant_failed: list[dict]             # pickup attempts that failed on the merchant's side
+    overdue: bool                           # today is past due_by
+    after: list[dict]                       # SUCCESS rent debits dated after due_by (refunded or not)
+    damages: list[dict]                     # ...not refunded (only when stuck)
+
+    @property
+    def stuck(self) -> bool:
+        """Past the pickup window, the device idle since the request, and no failed attempt on the merchant's side."""
+        return self.overdue and not self.pay.count and not self.merchant_failed
+
+
+def stuck_returns(conn, merchant_id: str, today: Any = None) -> list[StuckReturn]:
+    """Returns that were requested but never collected (late pickups are not counted here)."""
+    from munim import config
+    today_d = as_date(today) or as_date(config.DEMO_TODAY) or date.today()
+    out = []
+    for sub in subscriptions(conn, merchant_id):
+        if not sub["device_id"]:
+            continue
+        lc = lifecycle(conn, sub["device_id"], merchant_id, sub["started_at"])
+        if not lc.request or lc.pickup_at:
+            continue
+        due = as_date(lc.request["at"]) + timedelta(days=config.RETURN_PICKUP_DAYS)
+        pay = payments_via(conn, sub["device_id"], merchant_id, after=lc.request["at"])
+        mfail = [e for e in lc.failed if str(e["note"] or "").upper() in MERCHANT_SIDE_FAILURES]
+        after = [d for d in rent_debits(conn, merchant_id, sub["id"]) if d["value_date"] > due.isoformat()]
+        st = StuckReturn(sub, lc, due.isoformat(), pay, mfail, today_d > due, after, [])
+        if st.stuck:
+            st.damages = [d for d in after if not d["refund_id"]]
+        out.append(st)
+    return out
+
+
 @dataclass
 class DupGroup:
     device_id: str
@@ -459,7 +512,8 @@ def attempts_for(conn, loan_id: str, due: str) -> list[dict]:
     return _rows(conn, "SELECT * FROM edi_attempts WHERE loan_id=? AND due_date=? ORDER BY attempt_no, id", (loan_id, due))
 
 
-def wrongful_debits(conn, merchant_id: str, areas: set[str] | None = None, *, include_refunded: bool = True) -> dict[int, str]:
+def wrongful_debits(conn, merchant_id: str, areas: set[str] | None = None, *, include_refunded: bool = True,
+                    today: Any = None) -> dict[int, str]:
     """ledger id -> suspect id for every debit a FAULT pattern says should not have happened."""
     areas = set(AREAS) if areas is None else areas
     out: dict[int, str] = {}
@@ -470,10 +524,18 @@ def wrongful_debits(conn, merchant_id: str, areas: set[str] | None = None, *, in
         for g in duplicate_subscriptions(conn, merchant_id):
             for d in (g.extra if include_refunded else g.damages):
                 out.setdefault(d["id"], "DUPLICATE_SUBSCRIPTION")
+        for st in stuck_returns(conn, merchant_id, today):
+            if st.stuck:
+                for d in (st.after if include_refunded else st.damages):
+                    out.setdefault(d["id"], "RETURN_STUCK")
     if LOAN in areas:
         for le in edi_analysis(conn, merchant_id):
             for d in (le.extra if include_refunded else le.damages):
                 out[d["id"]] = "DUPLICATE_EDI"
+    if TRAVEL in areas:
+        from munim.forensics import travel             # lazy: travel builds on this module
+        for lid, sid in travel.wrongful(conn, merchant_id, today, include_refunded=include_refunded).items():
+            out.setdefault(lid, sid)
     return out
 
 
@@ -533,7 +595,7 @@ def stl_phrase(stls: list[dict]) -> str:
 
 # ───────────────────────────── evidence labels ─────────────────────────────
 
-_ENTRY = {"RENT_DEBIT": "rent debit", "EDI_DEBIT": "EDI debit", "SETTLEMENT_CREDIT": "settlement credit",
+_ENTRY = {"RENT_DEBIT": "rent debit", "EDI_DEBIT": "EDI debit", "BOOKING_DEBIT": "fare", "SETTLEMENT_CREDIT": "settlement credit",
           "REFUND_CREDIT": "refund credit", "CHARGEBACK_DEBIT": "chargeback debit"}
 
 

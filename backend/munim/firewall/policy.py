@@ -69,8 +69,10 @@ STATUS_DECISION: dict[str, Decision] = {
 
 MONEY_ACTIONS = frozenset({ActionType.REFUND_DEBITS, ActionType.RELEASE_HOLD})
 ALWAYS_PERMITTED = frozenset({ActionType.ESCALATE, ActionType.NO_ACTION})
-ESCALATION_TEAMS: tuple[str, ...] = ("risk", "billing", "logistics", "payments", "lending")
-REFUNDABLE_ENTRY_TYPES = frozenset({"RENT_DEBIT", "EDI_DEBIT"})
+# what a case opened in the merchant app may complete without a teammate (nothing here moves money)
+MERCHANT_SELF_SERVE = frozenset({ActionType.SCHEDULE_PICKUP, ActionType.SEND_KYC_LINK, ActionType.ESCALATE, ActionType.NO_ACTION})
+ESCALATION_TEAMS: tuple[str, ...] = ("risk", "billing", "logistics", "payments", "lending", "travel")
+REFUNDABLE_ENTRY_TYPES = frozenset({"RENT_DEBIT", "EDI_DEBIT", "BOOKING_DEBIT"})
 BAD_KYC_STATUSES = ("EXPIRED", "PENDING", "REJECTED")
 
 MAX_ACTIONS = 8              # a proposal longer than this is itself suspicious
@@ -114,7 +116,7 @@ def describe_debits(ledger_rows: list[dict]) -> str:
     if not ledger_rows:
         return "no debits"
     kinds = {r.get("entry_type") for r in ledger_rows}
-    noun = {"RENT_DEBIT": "rent debit", "EDI_DEBIT": "EDI debit"}.get(next(iter(kinds)), "debit") if len(kinds) == 1 else "debit"
+    noun = {"RENT_DEBIT": "rent debit", "EDI_DEBIT": "EDI debit", "BOOKING_DEBIT": "ticket fare"}.get(next(iter(kinds)), "debit") if len(kinds) == 1 else "debit"
     ordered = sorted(ledger_rows, key=lambda r: (r.get("value_date") or "", r.get("id") or 0))
     dates = join_human(fmt_date(r.get("value_date")) for r in ordered)
     if len(ordered) == 1:
@@ -198,6 +200,7 @@ class _Ctx:
     case_id: str | None
     human_approved: bool
     today: str
+    origin: str = "team"                                           # "merchant" = opened by the shop in the merchant app
     claimed_ids: dict[int, int] = field(default_factory=dict)      # ledger id -> action index (refunds in this proposal)
     claimed_keys: dict[str, int] = field(default_factory=dict)     # idempotency key -> action index
     batch_auto_paise: int = 0                                      # money already allowed earlier in this proposal
@@ -535,7 +538,7 @@ def _idempotency(ctx: _Ctx, w: _Work, idx: int, key: str) -> FirewallCheck:
             )
             if refunded:
                 first = refunded[0]
-                noun = {"RENT_DEBIT": "rent debit", "EDI_DEBIT": "EDI debit"}.get(first["entry_type"], "debit")
+                noun = {"RENT_DEBIT": "rent debit", "EDI_DEBIT": "EDI debit", "BOOKING_DEBIT": "ticket fare"}.get(first["entry_type"], "debit")
                 more = f" (and {plural(len(refunded) - 1, 'other debit')})" if len(refunded) > 1 else ""
                 return make_check("idempotency", "FAIL",
                                   f"The {rupees(first['orig_amount'])} {noun} of {fmt_date(first['orig_date'])}{more} was already refunded "
@@ -589,7 +592,7 @@ def _preconditions(ctx: _Ctx, w: _Work) -> FirewallCheck:
             b = bad[0]
             return make_check("preconditions", "FAIL",
                               f"Ledger entry {b['id']} is a {b['status']} {b['entry_type']} ({b['direction']}) of {fmt_date(b['value_date'])}, "
-                              f"not a successful rent or EDI debit, so it cannot be refunded.")
+                              f"not a successful rent, EDI or ticket fare debit, so it cannot be refunded.")
         return make_check("preconditions", "PASS",
                           f"All {plural(len(found), 'entry', 'entries')} are successful debits that can be refunded.")
     if t == ActionType.CANCEL_SUBSCRIPTION:
@@ -660,6 +663,9 @@ def _preconditions(ctx: _Ctx, w: _Work) -> FirewallCheck:
 
 def _limits(ctx: _Ctx, w: _Work) -> FirewallCheck:
     t = w.type
+    if ctx.origin == "merchant" and t not in MERCHANT_SELF_SERVE and t not in MONEY_ACTIONS and not ctx.human_approved:
+        return make_check("limits", "WARN", f"The merchant opened this case in the merchant app, which can only book pickups and "
+                                            f"send KYC links by itself, so a teammate signs off {t.value}.")
     if t not in MONEY_ACTIONS:
         return make_check("limits", "SKIP", f"{t.value} moves no money.")
     # a refund that lost its evidence is judged on what the LLM asked for (it is BLOCKed anyway)
@@ -669,6 +675,9 @@ def _limits(ctx: _Ctx, w: _Work) -> FirewallCheck:
     if ctx.human_approved:
         side = "over" if (amt > auto or total30 > cap) else "within"
         return make_check("limits", "PASS", f"{rupees(amt)} is {side} the automatic limits and was approved by a human reviewer.")
+    if ctx.origin == "merchant":
+        return make_check("limits", "WARN", f"The merchant opened this case in the merchant app, so a teammate signs off "
+                                            f"every payout from there, including this {rupees(amt)}.")
     if amt > auto:
         return make_check("limits", "WARN", f"{rupees(amt)} is over the {rupees(auto)} auto-approval limit, so a human must sign off.")
     if total30 > cap:
@@ -709,6 +718,22 @@ def _confidence(ctx: _Ctx, w: _Work) -> FirewallCheck:
 
 # ───────────────────────────── orchestration ─────────────────────────────
 
+def _source_off(action: ActionType) -> str | None:
+    """Why this action can't be carried out because its system is turned off in backend/sources/; None = available.
+    Fail-closed: if the sources can't be read, every action except ESCALATE / NO_ACTION is refused."""
+    if action in (ActionType.ESCALATE, ActionType.NO_ACTION):
+        return None
+    try:
+        from munim.sources import current
+        reg = current()
+        owner = reg.owner(action)
+    except Exception:  # noqa: BLE001
+        return "the connected sources (backend/sources/) could not be read"
+    if owner is None or owner.enabled:
+        return None
+    return f"the system that carries it out, {owner.name} ({reg.files.get(owner.id, owner.id)}), is turned off"
+
+
 def _evaluate_one(ctx: _Ctx, idx: int, pa: Any) -> ActionVerdict:
     w = _Work.from_proposed(pa)
     checks: list[FirewallCheck] = []
@@ -724,6 +749,9 @@ def _evaluate_one(ctx: _Ctx, idx: int, pa: Any) -> ActionVerdict:
     elif w.type is None:
         checks.append(make_check("allowlist", "FAIL", f"'{w.raw_type[:40]}' is not an action Munim knows how to take."))
         skip_rest("Not evaluated because the action type is unknown.")
+    elif off := _source_off(w.type):
+        checks.append(make_check("allowlist", "FAIL", f"{w.type.value} is refused: {off}."))
+        skip_rest("Not evaluated because the system that carries out this action is turned off.")
     else:
         _fill_target(ctx, w)
         if w.type == ActionType.RELEASE_HOLD and w.target:
@@ -768,11 +796,12 @@ def _safe_proposed(pa: Any, w: _Work) -> ProposedAction:
 
 def evaluate(conn: sqlite3.Connection, *, merchant_id: str, proposal: Proposal, verdict: Verdict,
              intake: IntakeResult | None = None, hunch: Hunch | None = None, case_id: str | None = None,
-             human_approved: bool = False, today: str = config.DEMO_TODAY) -> FirewallResult:
-    """Judge every proposed action. Pure apart from DB reads."""
+             human_approved: bool = False, today: str = config.DEMO_TODAY, origin: str = "team") -> FirewallResult:
+    """Judge every proposed action. Pure apart from DB reads. origin="merchant": every money action waits for a human."""
     m = one(conn, "SELECT business_name FROM merchants WHERE id = ?", (merchant_id,))
     ctx = _Ctx(conn=conn, merchant_id=merchant_id, merchant_name=(m or {}).get("business_name") or "this merchant",
-               verdict=verdict, intake=intake, hunch=hunch, case_id=case_id, human_approved=human_approved, today=today)
+               verdict=verdict, intake=intake, hunch=hunch, case_id=case_id, human_approved=human_approved, today=today,
+               origin=origin)
     actions = list(getattr(proposal, "actions", None) or [])
     out = [_evaluate_one(ctx, i, pa) for i, pa in enumerate(actions)]
     return FirewallResult(decision=worst(a.decision for a in out), actions=out)

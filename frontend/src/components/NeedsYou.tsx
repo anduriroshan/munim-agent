@@ -2,6 +2,7 @@
 import { Ban, Check, CircleCheck, LoaderCircle, Shield, TriangleExclamationPoint, Users } from "lucide-react";
 import { rupees } from "../format";
 import { cap, initials } from "../lib/explain";
+import { SweepReview, type SweepReviewRow } from "./SweepReview";
 
 export interface CaseApproval {
   id: number;
@@ -16,6 +17,8 @@ export interface SweepGroup {
   sweepId: string;
   cause: string;
   merchants: number;
+  /** "merchant" or "passenger": who the batch fix is for. */
+  who: string;
   total: number;
   actions: number;
   names: string[];
@@ -42,13 +45,16 @@ interface Props {
   replay: boolean;
   onApprove: (id: number) => void;
   onReject: (id: number) => void;
-  onApproveSweep: (sweepId: string) => void;
+  /** Approve the batch fix for the merchants a person ticked after checking each one. */
+  onApproveSweep: (sweepId: string, merchantIds: string[]) => Promise<void>;
+  /** Each merchant in the batch, with the proof a reviewer checks. */
+  loadSweep: (sweepId: string) => Promise<{ rows: SweepReviewRow[]; note: string | null }>;
   onOpen: ((caseId: string) => void) | null;
 }
 
 const NAMES_SHOWN = 3;
 
-export function NeedsYou({ approvals, sweeps, handed, decided, busy, replay, onApprove, onReject, onApproveSweep, onOpen }: Props) {
+export function NeedsYou({ approvals, sweeps, handed, decided, busy, replay, onApprove, onReject, onApproveSweep, loadSweep, onOpen }: Props) {
   const nothing = approvals.length === 0 && sweeps.length === 0;
   const liveOnly = replay ? "Needs the live backend" : undefined;
   return (
@@ -120,7 +126,7 @@ export function NeedsYou({ approvals, sweeps, handed, decided, busy, replay, onA
                   <Users className="ico" aria-hidden />
                 </span>
                 <div>
-                  <b>Same bug in {s.merchants} more merchants</b>
+                  <b>Same bug in {s.merchants} more {s.who}s</b>
                   <small>{s.cause}</small>
                 </div>
               </div>
@@ -132,18 +138,25 @@ export function NeedsYou({ approvals, sweeps, handed, decided, busy, replay, onA
                   <Users className="ico" aria-hidden />
                   Batch fix
                 </span>
-                <span className="spacer" />
-                <button type="button" className="btn ok" onClick={() => onApproveSweep(s.sweepId)} disabled={!!busy} title={replay ? "Simulated: the recording has no backend" : undefined}>
-                  {isBusy ? <LoaderCircle className="ico spin" aria-hidden /> : <Check className="ico" aria-hidden />}
-                  Approve all
-                </button>
               </div>
-              {s.names.length > 0 && (
-                <div className="names">
-                  {s.names.slice(0, NAMES_SHOWN).join(" · ")}
-                  {more > 0 ? ` · +${more} more` : ""}
-                </div>
-              )}
+              <SweepReview
+                sweepId={s.sweepId}
+                merchants={s.merchants}
+                who={s.who}
+                busy={isBusy}
+                disabled={!!busy && !isBusy}
+                simulated={replay}
+                load={loadSweep}
+                onApprove={(ids) => onApproveSweep(s.sweepId, ids)}
+                preview={
+                  s.names.length > 0 ? (
+                    <div className="names">
+                      {s.names.slice(0, NAMES_SHOWN).join(" · ")}
+                      {more > 0 ? ` · +${more} more` : ""}
+                    </div>
+                  ) : null
+                }
+              />
             </div>
           );
         })}

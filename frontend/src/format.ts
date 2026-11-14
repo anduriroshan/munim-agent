@@ -76,12 +76,17 @@ export function langLabel(code: string | null | undefined): string {
 
 export const SUSPECT_TITLES: Record<string, string> = {
   ZOMBIE_BILLING: "Billing continued after device return",
+  RETURN_STUCK: "Return stuck on our side",
   DUPLICATE_SUBSCRIPTION: "Two subscriptions on one device",
   DUPLICATE_EDI: "Loan instalment debited twice",
   PICKUP_NOT_COMPLETED: "Pickup never completed",
   ALREADY_REFUNDED: "Already refunded",
   RISK_HOLD: "Settlement held by risk team",
   KYC_HOLD: "Settlement held for KYC",
+  BUS_TRIP_FAILED: "Bus trip failed, fare not refunded",
+  AIRLINE_REFUND_NOT_PASSED: "Airline refund received, not passed on",
+  TRAVEL_NO_SHOW: "Passenger did not board",
+  AIRLINE_NOT_PAID: "Airline has not paid back yet",
 };
 
 export function suspectTitle(id: string | null | undefined): string {

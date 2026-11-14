@@ -27,6 +27,7 @@ class Intent(StrEnum):
     RENT_DEDUCTION = "RENT_DEDUCTION"        # device rental / subscription charges
     LOAN_DEDUCTION = "LOAN_DEDUCTION"        # loan EDI debits
     SETTLEMENT_ISSUE = "SETTLEMENT_ISSUE"    # payout held, short or delayed
+    TRAVEL_REFUND = "TRAVEL_REFUND"          # bus / flight ticket refund not received
     OTHER = "OTHER"
 
 
@@ -39,6 +40,8 @@ class ClaimKind(StrEnum):
     SETTLEMENT_SHORT = "SETTLEMENT_SHORT"          # amount_paise missing from a payout; date optional
     SETTLEMENT_NOT_RECEIVED = "SETTLEMENT_NOT_RECEIVED"  # amount_paise / date optional
     REFUND_DEMANDED = "REFUND_DEMANDED"            # amount_paise demanded, if stated
+    TRIP_NOT_COMPLETED = "TRIP_NOT_COMPLETED"      # "the bus turned back / never reached"; date optional
+    REFUND_NOT_RECEIVED = "REFUND_NOT_RECEIVED"    # ticket refund promised or due but not received; amount/date optional
     OTHER = "OTHER"
 
 
@@ -70,6 +73,15 @@ class ChatAnswer(BaseModel):
     new_case: bool = Field(False, description="True if the question is about a different problem that needs a new case.")
 
 
+class MerchantAnswer(BaseModel):
+    """Answer inside the merchant app, written only from this shop's redacted snapshot. It cannot move money."""
+    answer: str = Field(description="Reply to the merchant in the reply language and script; short, plain, at most 60 words.")
+    answer_en: str = Field("", description="The same reply in simple English (the same text if the reply is already English).")
+    intent: Literal["answer", "investigate"] = Field("answer", description=(
+        "'investigate' when the merchant reports a problem with money (a debit, a missing, short or held payout, a refund) "
+        "that needs Munim to check the money trail and open an issue; 'answer' when the snapshot already answers it."))
+
+
 class Hunch(BaseModel):
     """Prior belief over suspects from the complaint text alone (before evidence)."""
     source: str                                  # 'sarvam-prism' | 'llm:<model>' | 'mock'
@@ -94,7 +106,8 @@ class TrailNode(BaseModel):
     table: str
     row_id: str
     kind: Literal["merchant", "money", "subscription", "mandate", "device", "device_event", "pickup",
-                  "loan", "edi_attempt", "settlement", "hold", "kyc", "payments_summary", "chargeback", "action"]
+                  "loan", "edi_attempt", "settlement", "hold", "kyc", "payments_summary", "chargeback", "action",
+                  "booking", "trip", "trip_event", "airline_refund", "call"]
     label: str
     at: str | None = None
     amount_paise: int | None = None
@@ -173,8 +186,29 @@ class ProbePlan(BaseModel):
     evidence_ledger_ids: list[int] = []
 
 
+class SourceHit(BaseModel):
+    """One connected source (a file in backend/sources/) and what Munim did with it for this case."""
+    id: str                                      # 'devices', 'courier-scans'
+    name: str                                    # 'Devices and rent'
+    kind: Literal["database", "file", "api"]
+    reached: bool                                # its `when` matched this complaint
+    why: list[str] = []                          # 'always', 'rent complaint', 'claim: device returned', 'word: pickup'
+    status: Literal["ok", "error", "not_needed"] = "ok"
+    records: int = 0                             # database: records of its tables on the money trail; file/api: rows read
+    tables: list[str] = []                       # database sources
+    columns: list[str] = []                      # file/api: columns of `rows`
+    rows: list[list[Any]] = []                   # file/api: the merchant's rows (capped by max_rows)
+    error: str | None = None
+    ms: int | None = None
+
+
+class SourcesReport(BaseModel):
+    sources: list[SourceHit] = []                # enabled sources, reached first
+    problems: list[str] = []                     # source files that could not be loaded
+
+
 class Outcome(StrEnum):
-    REFUND_DUE = "REFUND_DUE"                    # FAULT suspect matched, money owed back
+    REFUND_DUE = "REFUND_DUE"                   # FAULT suspect matched, money owed back
     NO_FAULT = "NO_FAULT"                        # INNOCENT suspect matched: charges are legitimate
     HOLD_EXPLAINED = "HOLD_EXPLAINED"            # HOLD suspect matched
     IMPROVISED = "IMPROVISED"                    # no catalogued suspect; probes found an explanation → human confirms
@@ -278,6 +312,9 @@ class Scenario(BaseModel):
     complaint_text: str
     teaser: str                                  # one line for the UI card
     expect: dict[str, Any] = {}                  # outcome, culprit, decision, final_amount_paise (used by tests)
+    via: Literal["call", "email", "ticket"] = "ticket"   # how it reached the support inbox (demo data)
+    via_note: str = ""                           # call length or ticket number, shown under the source
+    received: str = ""                           # HH:MM on the demo day
 
 
 def rupees(paise: int | None) -> str:

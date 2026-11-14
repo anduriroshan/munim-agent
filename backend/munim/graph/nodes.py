@@ -18,7 +18,7 @@ from munim.db.conn import audit, tx
 from munim.events import NODES
 from munim.models import (
     ActionType, ExecutionResult, FirewallResult, Hunch, IntakeResult, Probe, ProbePlan, Proposal,
-    StatementCheck, SuspectResult, Trail, Verdict, rupees,
+    SourcesReport, StatementCheck, SuspectResult, Trail, Verdict, rupees,
 )
 
 from .state import CaseState
@@ -26,12 +26,12 @@ from .state import CaseState
 AGENT = {n: a for n, a, _ in NODES}
 
 ACTION_CATALOGUE = [
-    {"type": ActionType.REFUND_DEBITS, "description": "Credit back specific DEBIT ledger entries (rent, EDI). Needs ledger_entry_ids and amount_paise."},
+    {"type": ActionType.REFUND_DEBITS, "description": "Credit back specific DEBIT ledger entries (rent, EDI, ticket fare). Needs ledger_entry_ids and amount_paise."},
     {"type": ActionType.CANCEL_SUBSCRIPTION, "description": "Stop future billing. target_id = subscription id."},
     {"type": ActionType.SCHEDULE_PICKUP, "description": "Book a new device pickup. target_id = device id."},
     {"type": ActionType.SEND_KYC_LINK, "description": "Send the merchant a re-KYC / document upload link. target_id = hold id."},
     {"type": ActionType.RELEASE_HOLD, "description": "Release a settlement hold. target_id = hold id."},
-    {"type": ActionType.ESCALATE, "description": "Hand the case file to a human team. team = risk | billing | logistics | payments | lending."},
+    {"type": ActionType.ESCALATE, "description": "Hand the case file to a human team. team = risk | billing | logistics | payments | lending | travel."},
     {"type": ActionType.NO_ACTION, "description": "Nothing to do; explain to the merchant."},
 ]
 MONEY_ACTIONS = {ActionType.REFUND_DEBITS, ActionType.RELEASE_HOLD}
@@ -153,11 +153,13 @@ async def intake(state: CaseState, w: Writer):
 
 @graph_node("hunch", soft=True)
 async def hunch(state: CaseState, w: Writer):
-    from munim.forensics.suspects import CATALOGUE
+    from munim.forensics.suspects import CATALOGUE, lineup
     from munim.llm import router
+    with tx() as conn:
+        suspects = [CATALOGUE[sid] for sid in lineup(conn, state["merchant"]["id"])]
     ctx = {
         "complaint_text": state["complaint_text"], "merchant": state["merchant"], "scenario_id": state.get("scenario_id"),
-        "suspects": [{"id": s.id, "title": s.title, "description": s.description} for s in CATALOGUE.values()],
+        "suspects": [{"id": s.id, "title": s.title, "description": s.description} for s in suspects],
     }
     h: Hunch = await router.hunch(ctx)
     emit(w, "hunch", h)
@@ -173,8 +175,38 @@ async def trail(state: CaseState, w: Writer):
     with tx() as conn:
         t: Trail = build_trail(conn, state["merchant"]["id"], intake_, state["today"])
     emit(w, "trail", t)
-    return ({"trail": t.model_dump(mode="json")},
-            f"{len(t.nodes)} linked records · {len(t.disputed)} disputed movements")
+    update: dict[str, Any] = {"trail": t.model_dump(mode="json")}
+    summary = f"{len(t.nodes)} linked records · {len(t.disputed)} disputed movements"
+    report = await _reach_sources(state, intake_, t)
+    if report is not None:
+        emit(w, "sources", report)
+        update["sources"] = report.model_dump(mode="json")
+        for h in report.sources:
+            if h.reached and h.kind != "database" and (h.records or h.status != "ok"):
+                summary += f" · {h.name}: " + (f"{h.records} rows" if h.status == "ok" else "could not be read")
+    return (update, summary)
+
+
+async def _reach_sources(state: CaseState, intake_: IntakeResult, t: Trail) -> SourcesReport | None:
+    """Which connected sources matter for this complaint (backend/sources/), reading the outside ones that match.
+    Never breaks the trail: any failure here just means no 'sources' event."""
+    try:
+        from munim import sources
+        report = await sources.reach(sources.current(), intake_, state["complaint_text"], state["merchant"]["id"])
+        return sources.count_records(report, (n.table for n in t.nodes))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def allowed_catalogue() -> list[dict[str, str]]:
+    """The fix list offered to the Resolver: fixes owned by a turned-off source are left out (the firewall refuses them too)."""
+    try:
+        from munim.sources import current
+        reg = current()
+        ok = reg.action_allowed
+    except Exception:  # noqa: BLE001 - registry unreadable: the firewall still decides
+        ok = lambda _a: True  # noqa: E731
+    return [{"type": str(a["type"]), "description": a["description"]} for a in ACTION_CATALOGUE if ok(a["type"])]
 
 
 @graph_node("statements")
@@ -213,7 +245,10 @@ async def improvise(state: CaseState, w: Writer):
     from munim.forensics.probe import run_probe
     from munim.forensics.schema_card import schema_card
     from munim.llm import router
-    card = schema_card()
+    from munim.sources import current
+    report = SourcesReport.model_validate(state["sources"]) if state.get("sources") else None
+    card = schema_card(report.sources if report else None)
+    tables = current().enabled_tables()
     probes: list[Probe] = []
     plan: ProbePlan | None = None
     max_steps = config.MAX_PROBES
@@ -223,6 +258,7 @@ async def improvise(state: CaseState, w: Writer):
             "complaint_text": state["complaint_text"], "intake": state["intake"], "merchant_id": state["merchant"]["id"],
             "today": state["today"], "schema_card": card, "probes": [p.model_dump(mode="json") for p in probes],
             "step": step, "max_steps": max_steps, "scenario_id": state.get("scenario_id"),
+            "sources": state.get("sources"),
         }
         plan, res = await router.generate_json("reasoner", "improvise", ctx, ProbePlan, on_delta=on_delta)
         llm_done(w, "improvise", "reasoner", res)
@@ -231,7 +267,7 @@ async def improvise(state: CaseState, w: Writer):
         if len(probes) >= max_steps:   # budget exhausted: stop here, whatever the model wanted
             plan = ProbePlan(done=True, finding=plan.finding, evidence_ledger_ids=plan.evidence_ledger_ids)
             break
-        probe = run_probe(plan.sql, state["merchant"]["id"], step, plan.purpose or f"probe {step}")
+        probe = run_probe(plan.sql, state["merchant"]["id"], step, plan.purpose or f"probe {step}", tables=tables)
         probes.append(probe)
         emit(w, "probe", probe)
         _case_audit(state["case_id"], "detective", "probe", probe.model_dump(mode="json"))
@@ -266,7 +302,7 @@ async def propose(state: CaseState, w: Writer):
     ctx = {
         "complaint_text": state["complaint_text"], "intake": state["intake"], "verdict": state["verdict"],
         "statements": state.get("statements", []), "merchant": state["merchant"], "today": state["today"],
-        "action_catalogue": [{"type": str(a["type"]), "description": a["description"]} for a in ACTION_CATALOGUE],
+        "action_catalogue": allowed_catalogue(),
         "scenario_id": state.get("scenario_id"),
     }
     p, res = await router.generate_json("reasoner", "propose", ctx, Proposal, on_delta=llm_streamer(w, "propose", "reasoner"))
@@ -285,7 +321,7 @@ async def firewall(state: CaseState, w: Writer):
             conn, merchant_id=state["merchant"]["id"], proposal=Proposal.model_validate(state["proposal"]),
             verdict=Verdict.model_validate(state["verdict"]), intake=IntakeResult.model_validate(state["intake"]),
             hunch=Hunch.model_validate(state["hunch"]) if state.get("hunch") else None,
-            case_id=state["case_id"], today=state["today"],
+            case_id=state["case_id"], today=state["today"], origin=state.get("origin") or "team",
         )
     emit(w, "firewall", fw)
     per = " · ".join(f"{a.proposed.action_type}→{a.decision}" for a in fw.actions)
@@ -313,6 +349,8 @@ async def execute(state: CaseState, w: Writer):
 async def respond(state: CaseState, w: Writer):
     from munim.llm import router
     lang = (state.get("intake") or {}).get("language") or state["merchant"].get("language") or "en"
+    if state.get("channel") == "app" and lang == "en":    # the merchant app speaks the shop's own language
+        lang = state["merchant"].get("language") or "en"
     ctx = {
         "merchant": state["merchant"], "language": lang, "complaint_text": state["complaint_text"],
         "intake": state["intake"], "verdict": state["verdict"], "statements": state.get("statements", []),
@@ -323,7 +361,10 @@ async def respond(state: CaseState, w: Writer):
     llm_done(w, "respond", "writer", res)
     text = res.text.strip()
     en = await router.english_copy(text, lang, router.mock_english("respond", ctx), live_source=res.live)
-    emit(w, "message", {"role": "munim", "text": text, "en": en, "language": lang, "final": True})
+    msg = {"role": "munim", "text": text, "en": en, "language": lang, "final": True}
+    if state.get("channel") != "app":     # team cases: a draft on the case; a teammate presses Send
+        msg["draft"] = True
+    emit(w, "message", msg)
     if not should_sweep(state):
         node_status(w, "sweep", "skip", summary="no fleet-wide fault to sweep for")
     return ({"reply": text, "language": lang}, f"{len(text.split())} words · {lang} · {res.provider}")
@@ -336,13 +377,14 @@ async def sweep(state: CaseState, w: Writer):
     from munim.models import SweepResult, SweepVictim
     suspect_id = state["verdict"]["sweepable_suspect"]
     merchant_id = state["merchant"]["id"]
+    who = "passengers" if state["merchant"].get("category") == "passenger" else "merchants"
     with tx() as conn:
         existing = conn.execute(
             "SELECT id FROM sweeps WHERE suspect_id=? AND status='PENDING' ORDER BY created_at DESC LIMIT 1", (suspect_id,)
         ).fetchone()
         victims = find_victims(conn, suspect_id, merchant_id, state["today"])
         if not victims:
-            return ({"sweep": None}, "no other merchants affected")
+            return ({"sweep": None}, f"no other {who} affected")
         if existing:   # a sweep for this pattern is already waiting for sign-off: show it, don't queue twice
             action_ids = [r[0] for r in conn.execute(
                 "SELECT id FROM actions WHERE sweep_id=? AND status='PENDING_APPROVAL' ORDER BY id", (existing[0],))]
@@ -355,7 +397,7 @@ async def sweep(state: CaseState, w: Writer):
         else:
             result = create_sweep(conn, source_case_id=state["case_id"], suspect_id=suspect_id, victims=victims, today=state["today"])
     if not result.sweep_id or not result.merchant_count:
-        return ({"sweep": None}, "no other merchants qualify for a refund")
+        return ({"sweep": None}, f"no other {who} qualify for a refund")
     emit(w, "sweep", result)
     return ({"sweep": result.model_dump(mode="json")},
-            f"{suspect_id} in {result.merchant_count} more merchants · {rupees(result.total_paise)} queued for sign-off")
+            f"{suspect_id} in {result.merchant_count} more {who} · {rupees(result.total_paise)} queued for sign-off")

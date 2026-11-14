@@ -20,6 +20,7 @@ class EventType(StrEnum):
     INTAKE = "intake"            # IntakeResult
     HUNCH = "hunch"              # Hunch
     TRAIL = "trail"              # Trail
+    SOURCES = "sources"          # SourcesReport {sources:[SourceHit], problems:[str]} (after trail; backend/sources/)
     STATEMENTS = "statements"    # {checks: [StatementCheck]}
     SUSPECT = "suspect"          # SuspectResult (one event per suspect, in test order)
     PROBE = "probe"              # Probe (improvise only)
@@ -38,7 +39,7 @@ class EventType(StrEnum):
 NODES: list[tuple[str, str, str]] = [
     # (node, agent, label)
     ("intake", "Intake Agent", "Understand complaint"),
-    ("hunch", "Detective", "Hunch (Sarvam Prism)"),
+    ("hunch", "Detective", "Fake-instruction check (Sarvam Prism)"),
     ("trail", "Detective", "Follow the money trail"),
     ("statements", "Detective", "Check merchant's statements"),
     ("lineup", "Detective", "Suspect lineup"),

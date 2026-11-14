@@ -7,12 +7,15 @@ import {
   type CaseDetail,
   type CaseRow,
   type Health,
+  type InboxItem,
   type MerchantInfo,
   type Metrics,
   type MunimEvent,
   type PassbookRow,
   type Scenario,
+  type SourcesList,
   type SweepApproveResponse,
+  type SweepDetail,
 } from "./types";
 
 export class ApiError extends Error {
@@ -54,6 +57,8 @@ const post = <T>(path: string, body?: unknown) =>
 export const api = {
   health: () => request<Health>("/api/health", { timeoutMs: 4000 }),
   scenarios: () => request<Scenario[]>("/api/scenarios"),
+  /** The connected sources (backend/sources/): what Munim can reach, and when. */
+  sources: () => request<SourcesList>("/api/sources"),
   merchants: (q = "") => request<MerchantInfo[]>(`/api/merchants${q ? `?q=${encodeURIComponent(q)}` : ""}`),
   createCase: (body: { merchant_id: string; complaint_text: string; channel?: "chat" | "voice"; scenario_id?: string | null }) =>
     post<{ case_id: string }>("/api/cases", body),
@@ -70,8 +75,16 @@ export const api = {
   approve: (actionId: number, approver = "ops.lead") => post<ApproveResponse>(`/api/approvals/${actionId}/approve`, { approver }),
   reject: (actionId: number, approver = "ops.lead", reason = "") =>
     post<{ result: ApproveResponse["result"] }>(`/api/approvals/${actionId}/reject`, { approver, reason }),
-  approveSweep: (sweepId: string, approver = "ops.lead") =>
-    post<SweepApproveResponse>(`/api/sweeps/${encodeURIComponent(sweepId)}/approve`, { approver }),
+  /** Approve a sweep: only `merchantIds` when given (the ones the reviewer ticked), else every pending merchant. */
+  approveSweep: (sweepId: string, merchantIds?: string[], approver = "ops.lead") =>
+    post<SweepApproveResponse>(`/api/sweeps/${encodeURIComponent(sweepId)}/approve`,
+      merchantIds ? { approver, merchant_ids: merchantIds } : { approver }),
+  sweepDetail: (sweepId: string) => request<SweepDetail>(`/api/sweeps/${encodeURIComponent(sweepId)}`),
+  /** A teammate sends Munim's draft (as written, or `text` if they edited it). Nothing reaches the merchant before. */
+  sendReply: (caseId: string, seq: number | null, text?: string, by = "ops.lead") =>
+    post<{ event: MunimEvent }>(`/api/cases/${encodeURIComponent(caseId)}/replies/send`,
+      { seq, by, ...(text !== undefined ? { text } : {}) }),
+  inbox: () => request<InboxItem[]>("/api/inbox"),
   metrics: () => request<Metrics>("/api/metrics"),
   passbook: (merchantId: string) => request<PassbookRow[]>(`/api/merchants/${encodeURIComponent(merchantId)}/passbook`),
   reset: () => post<{ counts: Record<string, number> }>("/api/reset"),

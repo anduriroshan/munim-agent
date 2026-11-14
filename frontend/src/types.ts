@@ -11,6 +11,7 @@ export const EVENT_TYPES = [
   "intake",
   "hunch",
   "trail",
+  "sources",
   "statements",
   "suspect",
   "probe",
@@ -29,7 +30,7 @@ export type EventType = (typeof EVENT_TYPES)[number];
 /** Graph nodes in display order: (node, agent, label). Mirrors events.NODES. */
 export const NODES: ReadonlyArray<readonly [string, string, string]> = [
   ["intake", "Intake Agent", "Understand complaint"],
-  ["hunch", "Detective", "Hunch (Sarvam Prism)"],
+  ["hunch", "Detective", "Fake-instruction check (Sarvam Prism)"],
   ["trail", "Detective", "Follow the money trail"],
   ["statements", "Detective", "Check merchant's statements"],
   ["lineup", "Detective", "Suspect lineup"],
@@ -122,6 +123,13 @@ export interface MessageEventData {
   sources?: string[] | null;
   /** Chat answers: the question is a different problem and needs a new chat. */
   new_case?: boolean | null;
+  /** Team cases: Munim's reply or update waits on the case until a teammate presses Send. */
+  draft?: boolean | null;
+  /** kind "sent": the draft (event seq) a teammate sent, who sent it, and whether they edited it. */
+  ref?: number | null;
+  by?: string | null;
+  edited?: boolean | null;
+  reply_kind?: string | null;
 }
 
 export interface ApprovalEventData {
@@ -146,7 +154,7 @@ export interface DoneEventData {
 
 // ───────────────────────────── models.py ─────────────────────────────
 
-export type Intent = "RENT_DEDUCTION" | "LOAN_DEDUCTION" | "SETTLEMENT_ISSUE" | "OTHER";
+export type Intent = "RENT_DEDUCTION" | "LOAN_DEDUCTION" | "SETTLEMENT_ISSUE" | "TRAVEL_REFUND" | "OTHER";
 
 export type ClaimKind =
   | "DEVICE_RETURNED"
@@ -156,6 +164,8 @@ export type ClaimKind =
   | "SINGLE_DEVICE"
   | "SETTLEMENT_SHORT"
   | "SETTLEMENT_NOT_RECEIVED"
+  | "TRIP_NOT_COMPLETED"
+  | "REFUND_NOT_RECEIVED"
   | "REFUND_DEMANDED"
   | "OTHER";
 
@@ -201,6 +211,11 @@ export type TrailKind =
   | "mandate"
   | "device"
   | "device_event"
+  | "booking"
+  | "trip"
+  | "trip_event"
+  | "airline_refund"
+  | "call"
   | "pickup"
   | "loan"
   | "edi_attempt"
@@ -281,6 +296,50 @@ export interface Probe {
   rows?: unknown[][];
   error?: string | null;
   ms?: number;
+}
+
+/** One connected source (backend/sources/*.yaml) and what Munim did with it for this case. */
+export interface SourceHit {
+  id: string;
+  name: string;
+  kind: "database" | "file" | "api" | string;
+  reached: boolean;
+  why?: string[];
+  status?: "ok" | "error" | "not_needed" | string;
+  records?: number;
+  tables?: string[];
+  columns?: string[];
+  rows?: unknown[][];
+  error?: string | null;
+  ms?: number | null;
+}
+
+export interface SourcesReport {
+  sources: SourceHit[];
+  problems?: string[];
+}
+
+/** GET /api/sources: one row per source file. Never contains header values or API keys. */
+export interface SourceListing {
+  id: string;
+  name: string;
+  kind: "database" | "file" | "api" | string;
+  enabled: boolean;
+  file: string;
+  holds: string;
+  when: { always: boolean; topics: string[]; claims: string[]; words: string[] };
+  tables: string[];
+  actions: string[];
+  blocked_actions: string[];
+  max_rows: number;
+  detail: { path?: string; url?: string; headers?: string[]; rows_at?: string; merchant_column?: string };
+  warnings: string[];
+}
+
+export interface SourcesList {
+  dir: string;
+  sources: SourceListing[];
+  problems: string[];
 }
 
 export type Outcome = "REFUND_DUE" | "NO_FAULT" | "HOLD_EXPLAINED" | "IMPROVISED" | "NO_EVIDENCE" | "UNSOLVED";
@@ -373,6 +432,10 @@ export interface Scenario {
   teaser: string;
   expect?: Record<string, unknown>;
   merchant?: MerchantInfo;
+  /** how it reached support in the demo: call | email | ticket */
+  via?: string;
+  via_note?: string;
+  received?: string;
 }
 
 // ───────────────────────────── REST payloads ─────────────────────────────
@@ -424,6 +487,7 @@ export interface CaseRow {
   complaint_text: string;
   created_at: string;
   scenario_id?: string | null;
+  channel?: string;
 }
 
 export interface CaseDetail {
@@ -455,6 +519,67 @@ export interface ApprovalRow {
 export interface ApproveResponse {
   result: ExecutionResult;
   message?: { text: string; language?: string } | null;
+}
+
+/** GET /api/inbox: a case Munim worked, or a complaint nobody has opened yet (status "NEW", case_id null). */
+export interface InboxItem {
+  id: string;
+  case_id: string | null;
+  scenario_id?: string | null;
+  merchant_id: string;
+  business_name?: string | null;
+  owner_name?: string | null;
+  city?: string | null;
+  language?: string | null;
+  summary: string;
+  text: string;
+  /** How it reached support: call | email | ticket | chat | app. */
+  via: string;
+  via_note?: string;
+  received?: string | null;
+  created_at?: string | null;
+  status: string;
+  outcome?: string | null;
+  approvals: number;
+  /** Munim's reply: "draft" (waiting for Send), "sent", or null. */
+  reply?: "draft" | "sent" | null;
+}
+
+export interface SweepLedgerRow {
+  id: number;
+  txn_ref: string;
+  entry_type: string;
+  amount_paise: number;
+  status: string;
+  value_date: string;
+  narration: string;
+}
+
+export interface SweepMerchant {
+  merchant_id: string;
+  business_name: string;
+  owner_name?: string;
+  city?: string;
+  amount_paise: number;
+  status: string;
+  evidence: EvidenceRef[];
+  targets: Record<string, string>;
+  ledger: SweepLedgerRow[];
+  actions: { action_id: number; action_type: string; amount_paise: number; status: string; decided_by?: string | null;
+    params?: Record<string, unknown>; checks: FirewallCheck[] }[];
+}
+
+/** GET /api/sweeps/{id}: what a reviewer checks before signing a sweep. */
+export interface SweepDetail {
+  sweep_id: string;
+  suspect_id: string;
+  status: string;
+  created_at?: string;
+  source_case?: { id: string; complaint_text: string; business_name: string } | null;
+  merchant_count: number;
+  pending: number;
+  total_paise: number;
+  merchants: SweepMerchant[];
 }
 
 export interface SweepApproveResponse {
