@@ -639,13 +639,13 @@ export default function App() {
     ? { placeholder: "Munim is working…", disabled: true, busy: false, note: null, noteBad: false }
     : isReplay
       ? {
-          placeholder: "Ask about this case, or paste the merchant's words…",
+          placeholder: `Ask about this case, or paste the ${customerWord.toLowerCase()}'s words…`,
           disabled: true,
           busy: false,
           note: view.done ? (unusedTurns ? "This is a recording, so chat needs the live backend. Try a suggested question." : "This is a recording, so chat needs the live backend.") : null,
           noteBad: false,
         }
-      : { placeholder: "Ask about this case, or paste the merchant's words…", disabled: !live || !view.caseId, busy: !!pendingQ, note: chatError, noteBad: !!chatError };
+      : { placeholder: `Ask about this case, or paste the ${customerWord.toLowerCase()}'s words…`, disabled: !live || !view.caseId, busy: !!pendingQ, note: chatError, noteBad: !!chatError };
 
   const sweepOutcome = view.sweep?.sweep_id ? sweepOutcomes[view.sweep.sweep_id] : undefined;
   const sweepLine: SweepLine | null =

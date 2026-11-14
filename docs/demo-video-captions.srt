@@ -1,0 +1,55 @@
+1
+00:00:00,000 --> 00:00:10,000
+Money complaints reach support by call, ticket and email, in many languages.
+
+2
+00:00:10,000 --> 00:00:20,000
+A shop owner says, in Hindi, that rent is still cut after the Soundbox went back.
+
+3
+00:00:20,000 --> 00:00:30,000
+Munim follows the money: ledger, mandate, device, pickup.
+
+4
+00:00:30,000 --> 00:00:50,000
+The AI asked for ₹1,497. The rules recomputed ₹998 from the ledger and refunded that.
+
+5
+00:00:50,000 --> 00:01:00,000
+The reply is in Hindi and waits as a draft. Nothing reaches the merchant until a person presses Send.
+
+6
+00:01:00,000 --> 00:01:12,000
+Same bug found in 36 more merchants (₹32,029) before they complain. A person reviews each one.
+
+7
+00:01:12,000 --> 00:01:30,000
+Charged twice for one device: ₹2,495. That's over the ₹2,000 auto-limit, so a person approves.
+
+8
+00:01:30,000 --> 00:01:45,000
+Fake admin demands ₹50,000. No evidence, so it is blocked.
+
+9
+00:01:45,000 --> 00:02:00,000
+No known cause fits. The AI writes read-only SQL, finds a chargeback and hands it to the payments team.
+
+10
+00:02:00,000 --> 00:02:12,000
+A bus turned back at km 38, but the operator never marked it cancelled.
+
+11
+00:02:12,000 --> 00:02:25,000
+GPS and the driver's report prove it. The ₹1,640 fare is refunded, and 18 more passengers are found.
+
+12
+00:02:25,000 --> 00:02:45,000
+The airline paid the ₹21,860 refund on 3 Oct, but it was never matched to the booking. A person approves it. 8 more passengers are found.
+
+13
+00:02:45,000 --> 00:03:05,000
+Shop owners can ask Munim directly. It can book a pickup, but it never moves money from the app.
+
+14
+00:03:05,000 --> 00:03:12,000
+AI proposes. Code decides. A person signs off on big money.
